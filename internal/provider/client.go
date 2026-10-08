@@ -138,6 +138,34 @@ func (c *Client) GetBuild(ctx context.Context, id string) (*BuildSummary, error)
 	return &out.Build, nil
 }
 
+// CheckPolicy returns which of paths the workspace's ignore rules (plus extra) exclude.
+// ErrNotFound means the API predates ignore rules.
+func (c *Client) CheckPolicy(ctx context.Context, paths, extra []string) ([]string, error) {
+	if paths == nil {
+		paths = []string{}
+	}
+	if extra == nil {
+		extra = []string{}
+	}
+	var out struct {
+		Ignored []string `json:"ignored"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/policy/check", map[string][]string{"paths": paths, "extra": extra}, &out); err != nil {
+		return nil, err
+	}
+	return out.Ignored, nil
+}
+
+// TouchBuild tells Lilytrap a deployment is still there, so it isn't reported as stale.
+// Older APIs don't have the route; that's not an error.
+func (c *Client) TouchBuild(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodPost, "/agent/v1/builds/"+url.PathEscape(id)+"/seen", nil, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
 func (c *Client) RetireBuild(ctx context.Context, id string) error {
 	err := c.do(ctx, http.MethodDelete, "/agent/v1/builds/"+url.PathEscape(id), nil, nil)
 	if errors.Is(err, ErrNotFound) {

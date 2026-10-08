@@ -3,12 +3,14 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -24,6 +26,8 @@ import (
 
 type deploymentResource struct{ client *Client }
 
+var _ resource.ResourceWithModifyPlan = (*deploymentResource)(nil)
+
 type deploymentModel struct {
 	ID                types.String `tfsdk:"id"`
 	Name              types.String `tfsdk:"name"`
@@ -31,6 +35,8 @@ type deploymentModel struct {
 	Location          types.String `tfsdk:"location"`
 	TrustedIdentities types.List   `tfsdk:"trusted_identities"`
 	AccessDetection   types.Bool   `tfsdk:"access_detection"`
+	Paths             types.List   `tfsdk:"paths"`
+	Ignore            types.List   `tfsdk:"ignore"`
 	Decoys            []decoyModel `tfsdk:"decoys"`
 	CreatedAt         types.String `tfsdk:"created_at"`
 	TrapURL           types.String `tfsdk:"trap_url"`
@@ -82,6 +88,18 @@ func (r *deploymentResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Optional: true, Computed: true, Default: booldefault.StaticBool(true),
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
 				Description:   "Generate an ingest key so an audit-log forwarder can report reads of the decoys.",
+			},
+			"paths": schema.ListAttribute{
+				ElementType: types.StringType, Optional: true,
+				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
+				Validators:    []validator.List{listvalidator.SizeAtMost(500)},
+				Description: "Where these decoys live, as .lilyignore resource paths (e.g. vault/secret/prod/admin). " +
+					"Checked against the workspace's ignore rules and `ignore` at plan time: an excluded path fails the plan before anything is created.",
+			},
+			"ignore": schema.ListAttribute{
+				ElementType: types.StringType, Optional: true,
+				Validators:  []validator.List{listvalidator.SizeAtMost(200)},
+				Description: "Extra .lilyignore patterns for `paths`, on top of the workspace's rules.",
 			},
 			"decoys": schema.ListNestedAttribute{
 				Required:      true,
@@ -210,6 +228,42 @@ func buildManifest(ctx context.Context, plan deploymentModel, trapURL string) (M
 	return m, ingestKey, diags
 }
 
+// ModifyPlan refuses, at plan time, decoys whose `paths` an ignore rule excludes. Unknown values
+// (paths computed from other resources) are checked once they're known, on the next plan.
+func (r *deploymentResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() || r.client == nil || r.client.APIKey == "" {
+		return // destroy, or not configured yet
+	}
+	var plan deploymentModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() || plan.Paths.IsNull() || plan.Paths.IsUnknown() || plan.Ignore.IsUnknown() {
+		return
+	}
+	var paths, extra []string
+	resp.Diagnostics.Append(plan.Paths.ElementsAs(ctx, &paths, false)...)
+	if !plan.Ignore.IsNull() {
+		resp.Diagnostics.Append(plan.Ignore.ElementsAs(ctx, &extra, false)...)
+	}
+	if resp.Diagnostics.HasError() || len(paths) == 0 {
+		return
+	}
+	ignored, err := r.client.CheckPolicy(ctx, paths, extra)
+	if errors.Is(err, ErrNotFound) {
+		if len(extra) > 0 {
+			resp.Diagnostics.AddAttributeError(path.Root("ignore"), "Lilytrap can't check ignore rules", "This Lilytrap API predates ignore rules, so `ignore` can't be applied.")
+		}
+		return
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Couldn't read Lilytrap's ignore rules", err.Error())
+		return
+	}
+	for _, p := range ignored {
+		resp.Diagnostics.AddAttributeError(path.Root("paths"), "Decoy location is ignored",
+			fmt.Sprintf("Lilytrap ignore rules exclude %s. Move the decoy, or drop it from this deployment (data.lilytrap_policy can filter paths).", p))
+	}
+}
+
 func (r *deploymentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state deploymentModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -225,6 +279,10 @@ func (r *deploymentResource) Read(ctx context.Context, req resource.ReadRequest,
 	if err != nil {
 		resp.Diagnostics.AddError("Couldn't read the Lilytrap deployment", err.Error())
 		return
+	}
+	// Every refresh is a sign the decoys are still there; without this they'd show as stale.
+	if err := r.client.TouchBuild(ctx, state.ID.ValueString()); err != nil {
+		resp.Diagnostics.AddWarning("Couldn't tell Lilytrap this deployment is still there", err.Error())
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }

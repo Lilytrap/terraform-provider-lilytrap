@@ -6,6 +6,7 @@
 //
 // Data sources:
 //   - lilytrap_trap: the trap and ingest URLs for this workspace
+//   - lilytrap_policy: which of the given resource paths the workspace's ignore rules exclude
 package provider
 
 import (
@@ -80,7 +81,7 @@ func (p *lilytrapProvider) Resources(_ context.Context) []func() resource.Resour
 }
 
 func (p *lilytrapProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{newTrapDataSource}
+	return []func() datasource.DataSource{newTrapDataSource, newPolicyDataSource}
 }
 
 func firstNonEmpty(values ...string) string {

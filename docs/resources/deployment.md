@@ -8,6 +8,10 @@ description: Registers decoys with Lilytrap and retires them on destroy.
 Registers decoys with Lilytrap by hash.
 Any change creates a new deployment.
 Destroying it retires the decoys, so they stop matching.
+Every refresh tells Lilytrap the deployment is still there, so it isn't reported as stale.
+
+Set `paths` to where the decoys live, and the plan fails if the workspace's ignore rules (or `ignore`) exclude any of them, before anything is created.
+To skip excluded locations instead of failing, filter them first with the `lilytrap_policy` data source.
 
 ## Example
 
@@ -15,6 +19,7 @@ Destroying it retires the decoys, so they stop matching.
 resource "lilytrap_deployment" "prod" {
   name               = "aws/prod"
   location           = "aws:111122223333/us-east-2"
+  paths              = ["aws/111122223333/us-east-2/secretsmanager/prod/platform/admin-api"]
   trusted_identities = ["arn:aws:iam::111122223333:role/terraform"]
   decoys = [{
     kit       = "cloud-secret"
@@ -46,6 +51,8 @@ resource "lilytrap_deployment" "prod" {
 - `location` (String) e.g. `aws:111122223333/us-east-2`.
 - `trusted_identities` (List of String) Reads by these never alert. IP, CIDR, ARN, glob or `exe:/path`.
 - `access_detection` (Boolean) Defaults to true. Generates `ingest_key` for an audit-log forwarder.
+- `paths` (List of String) Where the decoys live, as `.lilyignore` resource paths. Checked against ignore rules at plan time.
+- `ignore` (List of String) Extra `.lilyignore` patterns for `paths`, on top of the workspace's rules.
 
 ### Read-only
 
